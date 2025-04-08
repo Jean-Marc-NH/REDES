@@ -1,114 +1,139 @@
-
-#include <iostream>
-#include <cstdlib>
-#include <cstring>
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
-#include <vector>
-#include <algorithm>
+#include <thread>
+#include <iostream>
+#include <map>
+#include <sstream>
+#include <iomanip>
+#include <mutex>
 
-#define PORT 45000
-#define MAX_CLIENTS 10
+using namespace std;
 
-int main() {
-    int server_fd, new_socket, max_sd, activity, valread;
-    struct sockaddr_in address;
-    int addrlen = sizeof(address);
+map<string, int> usuarios;
+mutex user_mutex;
+
+string formatServerMessage(string msg, string from) {
+    stringstream ss;
+    ss << setw(5) << setfill('0') << (1 + 5 + msg.size() + 5 + from.size()); // tamaño total
+    ss << 'M';
+    ss << setw(5) << setfill('0') << msg.size() << msg;
+    ss << setw(5) << setfill('0') << from.size() << from;
+    return ss.str();
+}
+
+string formatUserList() {
+    stringstream ss, payload;
+    for (const auto& pair : usuarios) {
+        payload << pair.first << ",";
+    }
+    string data = payload.str();
+    if (!data.empty()) data.pop_back(); // quitar la última coma
+
+    ss << setw(5) << setfill('0') << (1 + data.size()); // tamaño total
+    ss << 'L' << data;
+    return ss.str();
+}
+
+void handleClient(int cliSock) {
     char buffer[1024];
-    fd_set readfds;
-    std::vector<int> clients;
+    int n;
 
-    // 1. Crear socket del servidor
-    server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd == 0) {
-        perror("Error al crear el socket");
-        exit(EXIT_FAILURE);
+    // Leer nombre de usuario al inicio
+    bzero(buffer, sizeof(buffer));
+    n = read(cliSock, buffer, sizeof(buffer) - 1);
+    buffer[n] = '\0';
+    string nombre(buffer);
+
+    {
+        lock_guard<mutex> lock(user_mutex);
+        usuarios[nombre] = cliSock;
     }
 
-    // 2. Configurar la dirección del servidor
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(PORT);
+    cout << nombre << " se ha conectado.\n";
 
-    // 3. Enlazar el socket
-    if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
-        perror("Error en bind");
-        exit(EXIT_FAILURE);
-    }
+    while ((n = read(cliSock, buffer, sizeof(buffer) - 1)) > 0) {
+        buffer[n] = '\0';
 
-    // 4. Poner en modo escucha
-    if (listen(server_fd, MAX_CLIENTS) < 0) {
-        perror("Error en listen");
-        exit(EXIT_FAILURE);
-    }
-
-    std::cout << "Servidor escuchando en el puerto " << PORT << "..." << std::endl;
-
-    while (true) {
-        // Limpiar el conjunto de descriptores
-        FD_ZERO(&readfds);
-        FD_SET(server_fd, &readfds);
-        max_sd = server_fd;
-
-        // Agregar clientes al conjunto de descriptores
-        for (int client : clients) {
-            FD_SET(client, &readfds);
-            if (client > max_sd) max_sd = client;
-        }
-
-        // Esperar actividad en algún socket
-        activity = select(max_sd + 1, &readfds, NULL, NULL, NULL);
-        if (activity < 0) {
-            perror("Error en select");
+        if (strncmp(buffer, "00001l", 6) == 0) {
+            string lista = formatUserList();
+            write(cliSock, lista.c_str(), lista.size());
             continue;
         }
 
-        // Nueva conexión entrante
-        if (FD_ISSET(server_fd, &readfds)) {
-            new_socket = accept(server_fd, (struct sockaddr*)&address, (socklen_t*)&addrlen);
-            if (new_socket < 0) {
-                perror("Error en accept");
-                continue;
-            }
-            std::cout << "Nuevo cliente conectado." << std::endl;
-            clients.push_back(new_socket);
-        }
+        if (buffer[5] == 'm') {
+            int msgLen = stoi(string(buffer + 6, 5));
+            string mensaje(buffer + 11, msgLen);
+            int userLen = stoi(string(buffer + 11 + msgLen, 5));
+            string destino(buffer + 16 + msgLen, userLen);
 
-        // Revisar actividad en los clientes
-        for (auto it = clients.begin(); it != clients.end();) {
-            int sd = *it;
-            if (FD_ISSET(sd, &readfds)) {
-                valread = read(sd, buffer, sizeof(buffer) - 1);
-                if (valread <= 0) {
-                    std::cout << "Cliente desconectado." << std::endl;
-                    close(sd);
-                    it = clients.erase(it);
+            int destSock;
+            {
+                lock_guard<mutex> lock(user_mutex);
+                if (usuarios.find(destino) == usuarios.end()) {
+                    string errorMsg = formatServerMessage("Usuario no disponible", "Servidor");
+                    write(cliSock, errorMsg.c_str(), errorMsg.size());
                     continue;
                 }
-
-                buffer[valread] = '\0';
-                std::cout << "Cliente: " << buffer << std::endl;
-
-                // Si el cliente dice "chau", desconectarlo
-                if (strncmp(buffer, "chau", 4) == 0) {
-                    std::cout << "Cliente se ha desconectado voluntariamente." << std::endl;
-                    close(sd);
-                    it = clients.erase(it);
-                    continue;
-                }
-
-                // Enviar mensaje a todos los demás clientes
-                for (int client : clients) {
-                    if (client != sd) {
-                        send(client, buffer, strlen(buffer), 0);
-                    }
-                }
+                destSock = usuarios[destino];
             }
-            ++it;
+
+            string enviado = formatServerMessage(mensaje, nombre);
+            write(destSock, enviado.c_str(), enviado.size());
         }
     }
 
-    close(server_fd);
+    // Desconexión
+    {
+        lock_guard<mutex> lock(user_mutex);
+        usuarios.erase(nombre);
+    }
+
+    close(cliSock);
+    cout << nombre << " se ha desconectado.\n";
+}
+
+int main(void) {
+    struct sockaddr_in stSockAddr;
+    int SocketFD = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+
+    if (-1 == SocketFD) {
+        perror("cannot create socket");
+        exit(EXIT_FAILURE);
+    }
+
+    memset(&stSockAddr, 0, sizeof(struct sockaddr_in));
+    stSockAddr.sin_family = AF_INET;
+    stSockAddr.sin_port = htons(45000);
+    stSockAddr.sin_addr.s_addr = INADDR_ANY;
+
+    if (-1 == bind(SocketFD, (const struct sockaddr *)&stSockAddr, sizeof(struct sockaddr_in))) {
+        perror("bind failed");
+        close(SocketFD);
+        exit(EXIT_FAILURE);
+    }
+
+    if (-1 == listen(SocketFD, 10)) {
+        perror("listen failed");
+        close(SocketFD);
+        exit(EXIT_FAILURE);
+    }
+
+    cout << "Servidor escuchando en puerto 45000...\n";
+
+    while (true) {
+        int cliSock = accept(SocketFD, NULL, NULL);
+        if (cliSock < 0) {
+            perror("accept failed");
+            continue;
+        }
+        thread(handleClient, cliSock).detach();
+    }
+
+    close(SocketFD);
     return 0;
 }
