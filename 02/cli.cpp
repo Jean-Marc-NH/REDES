@@ -8,32 +8,57 @@
 #include <unistd.h>
 #include <thread>
 #include <iostream>
+#include <sstream>
+#include <iomanip>
+
+using namespace std;
+
+string usuario;
+
+string formatMessage(string mensaje, string destino) {
+    stringstream ss;
+    string msgLen = to_string(mensaje.size());
+    string destLen = to_string(destino.size());
+
+    ss << setw(5) << setfill('0') << (1 + 5 + mensaje.size() + 5 + destino.size()); // total length
+    ss << 'm';
+    ss << setw(5) << setfill('0') << mensaje.size();
+    ss << mensaje;
+    ss << setw(5) << setfill('0') << destino.size();
+    ss << destino;
+
+    return ss.str();
+}
 
 void readSocketThread(int cli) {
-    char buffer[300];
+    char buffer[1024];
     int n;
-    while (true) {
-        bzero(buffer, 300);
-        n = read(cli, buffer, 299);
-        if (n <= 0) {
-            printf("Servidor desconectado.\n");
-            break;
-        }
+    while ((n = read(cli, buffer, sizeof(buffer) - 1)) > 0) {
         buffer[n] = '\0';
-        printf("Server: %s\n", buffer);
+
+        if (buffer[5] == 'M') {
+            int msgLen = stoi(string(buffer + 6, 5));
+            string mensaje(buffer + 11, msgLen);
+            int userLen = stoi(string(buffer + 11 + msgLen, 5));
+            string emisor(buffer + 16 + msgLen, userLen);
+
+            cout << "\nMensaje de " << emisor << ": " << mensaje << endl;
+        } else if (buffer[5] == 'L') {
+            string lista(buffer + 6);
+            cout << "\nUsuarios conectados: " << lista << endl;
+        }
     }
     shutdown(cli, SHUT_RDWR);
     close(cli);
-    exit(0); // Cerrar el programa si el servidor se desconecta
+    exit(0);
 }
 
-int main() {
+int main(void) {
     struct sockaddr_in stSockAddr;
     int SocketFD = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
-    char buffer[300];
-    int n;
+    char buffer[256];
 
-    if (SocketFD == -1) {
+    if (-1 == SocketFD) {
         perror("cannot create socket");
         exit(EXIT_FAILURE);
     }
@@ -43,34 +68,41 @@ int main() {
     stSockAddr.sin_port = htons(45000);
     inet_pton(AF_INET, "127.0.0.1", &stSockAddr.sin_addr);
 
-    if (connect(SocketFD, (const struct sockaddr*)&stSockAddr, sizeof(struct sockaddr_in)) == -1) {
+    if (-1 == connect(SocketFD, (const struct sockaddr *)&stSockAddr, sizeof(struct sockaddr_in))) {
         perror("connect failed");
         close(SocketFD);
         exit(EXIT_FAILURE);
     }
 
-    // 🔹 Iniciar un solo hilo de lectura
-    std::thread(readSocketThread, SocketFD).detach();
+    cout << "Introduce tu nombre de usuario: ";
+    getline(cin, usuario);
+    write(SocketFD, usuario.c_str(), usuario.size());
+
+    thread(readSocketThread, SocketFD).detach();
 
     while (true) {
-        printf("Client: ");
-        bzero(buffer, 300);
-        fgets(buffer, 299, stdin);
-        buffer[strcspn(buffer, "\n")] = '\0';
+        cout << "\nMensaje o comando (\"chau\" para salir): ";
+        string entrada;
+        getline(cin, entrada);
 
-        n = write(SocketFD, buffer, strlen(buffer));
-        if (n < 0) {
-            perror("ERROR writing to socket");
+        if (entrada == "chau") {
+            shutdown(SocketFD, SHUT_RDWR);
+            close(SocketFD);
             break;
         }
 
-        if (strcmp(buffer, "chau") == 0) {
-            printf("Chau.\n");
-            break;
+        if (entrada == "lista") {
+            write(SocketFD, "00001l", 6);
+            continue;
         }
+
+        cout << "Destinatario: ";
+        string destino;
+        getline(cin, destino);
+
+        string mensajeFormateado = formatMessage(entrada, destino);
+        write(SocketFD, mensajeFormateado.c_str(), mensajeFormateado.size());
     }
 
-    shutdown(SocketFD, SHUT_RDWR);
-    close(SocketFD);
     return 0;
 }
