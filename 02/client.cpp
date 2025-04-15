@@ -15,7 +15,6 @@ using namespace std;
 
 string usuario;
 
-// Función auxiliar para leer "n" bytes del socket
 string readN(int sock, int n) {
     string result;
     char buffer[1];
@@ -27,11 +26,9 @@ string readN(int sock, int n) {
     return result;
 }
 
-// Construye el mensaje normal (cliente→servidor) utilizando el protocolo:
-// [5 bytes total] + 'm' + [5 bytes tamaño mensaje] + mensaje + [5 bytes tamaño destino] + destino
 string formatMessage(const string &mensaje, const string &destino) {
     stringstream ss;
-    int total = 1 + 5 + mensaje.size() + 5 + destino.size(); // 1 por la 'm'
+    int total = 1 + 5 + mensaje.size() + 5 + destino.size();
     ss << setw(5) << setfill('0') << total;
     ss << 'm';
     ss << setw(5) << setfill('0') << mensaje.size();
@@ -41,8 +38,6 @@ string formatMessage(const string &mensaje, const string &destino) {
     return ss.str();
 }
 
-// Construye el mensaje de broadcast desde cliente a servidor:
-// [5 bytes total] + 'b' + [5 bytes tamaño del mensaje] + mensaje
 string formatBroadcastMessage(const string &mensaje) {
     int total = 1 + 5 + mensaje.size();
     stringstream ss;
@@ -53,18 +48,16 @@ string formatBroadcastMessage(const string &mensaje) {
     return ss.str();
 }
 
-// Lectura dinámica del socket, interpretando el protocolo
 void readSocketThread(int cli) {
     while (true) {
-        // Leer los 5 bytes que indican el tamaño total del mensaje
         string header = readN(cli, 5);
-        if (header.size() < 5) break;  // desconexión
+        if (header.size() < 5) break;
         int totalLen = stoi(header);
-        // Leer el tipo de mensaje (1 byte)
         string typeStr = readN(cli, 1);
         if (typeStr.size() < 1) break;
         char type = typeStr[0];
-        if (type == 'M') { // Mensaje normal (del servidor)
+
+        if (type == 'M') {
             string lenMsgStr = readN(cli, 5);
             int lenMsg = stoi(lenMsgStr);
             string mensaje = readN(cli, lenMsg);
@@ -72,11 +65,11 @@ void readSocketThread(int cli) {
             int lenSender = stoi(lenSenderStr);
             string sender = readN(cli, lenSender);
             cout << "\nMensaje de " << sender << ": " << mensaje << endl;
-        } else if (type == 'L') { // Lista de usuarios
+        } else if (type == 'L') {
             int payloadSize = totalLen - 1;
             string lista = readN(cli, payloadSize);
             cout << "\nUsuarios conectados: " << lista << endl;
-        } else if (type == 'b') { // Mensaje broadcast enviado desde el servidor
+        } else if (type == 'b') {
             string lenMsgStr = readN(cli, 5);
             int lenMsg = stoi(lenMsgStr);
             string lenSenderStr = readN(cli, 5);
@@ -84,6 +77,9 @@ void readSocketThread(int cli) {
             string sender = readN(cli, lenSender);
             string mensaje = readN(cli, lenMsg);
             cout << "\nBroadcast de " << sender << ": " << mensaje << endl;
+        } else if (type == 'q') {
+            cout << "\nServidor indicó cierre de conexión." << endl;
+            break;
         }
     }
     shutdown(cli, SHUT_RDWR);
@@ -107,7 +103,7 @@ int main(void) {
         close(SocketFD);
         exit(EXIT_FAILURE);
     }
-    // Enviar nombre de usuario usando el protocolo de login: [5 bytes tamaño] + 'n' + nombre
+
     cout << "Introduce tu nombre de usuario: ";
     getline(cin, usuario);
     {
@@ -118,22 +114,26 @@ int main(void) {
         string loginMsg = ss.str();
         write(SocketFD, loginMsg.c_str(), loginMsg.size());
     }
+    
     thread(readSocketThread, SocketFD).detach();
     
     while (true) {
-        cout << "\nIngrese comando (mensaje, lista, broadcast o chau): ";
+        cout << "\nIngrese comando (mensaje, broadcast, lista o chau): ";
         string entrada;
         getline(cin, entrada);
+        
         if (entrada == "chau") {
+            write(SocketFD, "00001q", 6);
             shutdown(SocketFD, SHUT_RDWR);
             close(SocketFD);
             break;
         }
+        
         if (entrada == "lista") {
-            // Enviar solicitud de lista de usuarios: "00001l"
             write(SocketFD, "00001l", 6);
             continue;
         }
+        
         if (entrada == "broadcast") {
             cout << "Ingrese mensaje de broadcast: ";
             string bMsg;
@@ -142,7 +142,7 @@ int main(void) {
             write(SocketFD, bProtocol.c_str(), bProtocol.size());
             continue;
         }
-        // Caso normal: se envía mensaje a un destinatario particular.
+        
         cout << "Destinatario: ";
         string destino;
         getline(cin, destino);
