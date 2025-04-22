@@ -16,12 +16,17 @@
 using namespace std;
 
 string usuario;
+int mainSock;
+bool in_client_game = false;
+bool spectator_request = false;
+char my_symbol = '_';
+bool my_turn = false;
 
 string readN(int sock, int n) {
     string result;
     char buffer[1];
     int bytesRead;
-    while (n > 0 && (bytesRead = read(sock, buffer, 1)) > 0) {
+    while(n > 0 && (bytesRead = read(sock, buffer, 1)) > 0) {
         result.append(buffer, bytesRead);
         n -= bytesRead;
     }
@@ -32,7 +37,7 @@ string formatMessage(const string &mensaje, const string &destino) {
     stringstream ss;
     int total = 1 + 5 + mensaje.size() + 5 + destino.size();
     ss << setw(5) << setfill('0') << total;
-    ss << 'm';
+    ss << 'M';
     ss << setw(5) << setfill('0') << mensaje.size();
     ss << mensaje;
     ss << setw(5) << setfill('0') << destino.size();
@@ -50,14 +55,8 @@ string formatBroadcastMessage(const string &mensaje) {
     return ss.str();
 }
 
-// Construye el mensaje de envío de archivo (cliente usa 'F')
-string formatFileMessage(const string &filepath, const string &destino) {
-    // Extrae el nombre de archivo
-    string filename = filepath.substr(filepath.find_last_of("/\\") + 1);
-    if (filename.size() > 100) filename = filename.substr(0, 100);
-
-    // Lee todo el contenido binario del archivo
-    ifstream infile(filepath, ios::binary);
+string formatFileMessage(const string &filename, const string &destino) {
+    ifstream infile(filename, ios::binary);
     vector<char> buffer((istreambuf_iterator<char>(infile)), istreambuf_iterator<char>());
     infile.close();
 
@@ -76,6 +75,29 @@ string formatFileMessage(const string &filepath, const string &destino) {
     return msg;
 }
 
+string formatSpectator() {
+    // According to server: expect payload "ver" with length header
+    string payload = "ver";
+    int total = payload.size(); // server reads totalLen as payload length
+    stringstream ss;
+    ss << setw(5) << setfill('0') << total;
+    ss << 'V';
+    ss << payload;
+    return ss.str();
+}
+
+string formatPlayMessage(int pos, char sym) {
+    string posStr = to_string(pos);
+    int total = 1 + 5 + posStr.size() + 1;
+    stringstream ss;
+    ss << setw(5) << setfill('0') << total;
+    ss << 'P';
+    ss << setw(5) << setfill('0') << posStr.size();
+    ss << posStr;
+    ss << sym;
+    return ss.str();
+}
+
 void readSocketThread(int cli) {
     while (true) {
         string header = readN(cli, 5);
@@ -85,7 +107,12 @@ void readSocketThread(int cli) {
         if (typeStr.size() < 1) break;
         char type = typeStr[0];
 
-        if (type == 'M') {
+        if (type == 'J') {
+            // Protocolo Join recibido
+            cout << "[Sistema] Protocolo Join recibido. Esperando mensaje..." << endl;
+            continue;
+        }
+        else if (type == 'M') {
             string lenMsgStr = readN(cli, 5);
             int lenMsg = stoi(lenMsgStr);
             string mensaje = readN(cli, lenMsg);
@@ -93,6 +120,55 @@ void readSocketThread(int cli) {
             int lenSender = stoi(lenSenderStr);
             string sender = readN(cli, lenSender);
             cout << "\nMensaje de " << sender << ": " << mensaje << endl;
+            if (mensaje == "wait") {
+                in_client_game = true;
+                my_symbol = 'x';
+                cout << "[TTT] Eres jugador X. Esperando segundo jugador..." << endl;
+            } else if (mensaje == "start") {
+                in_client_game = true;
+                my_symbol = 'o';
+                cout << "[TTT] Jugadores listos. Eres jugador O." << endl;
+            } else if (mensaje == "quieres ver") {
+                spectator_request = true;
+                cout << "[TTT] El servidor ofrece ser espectador. Escribe 'ver' para aceptar." << endl;
+            }
+        }
+        else if (type == 'X') {
+            // View del tablero
+            string lenStr = readN(cli, 5);
+            int len = stoi(lenStr);
+            string boardState = readN(cli, len);
+            cout << "\n[TTT] Estado del tablero:" << endl;
+            for (int i = 0; i < 9; ++i) {
+                cout << (boardState[i] == '_' ? '.' : boardState[i]) << ' ';
+                if (i % 3 == 2) cout << endl;
+            }
+            if (in_client_game) {
+                // determinar turno
+                int countX = count(boardState.begin(), boardState.end(), 'x');
+                int countO = count(boardState.begin(), boardState.end(), 'o');
+                char turn = (countX <= countO) ? 'x' : 'o';
+                if (turn == my_symbol) {
+                    my_turn = true;
+                    cout << "[TTT] Tu turno. Escribe 'play' para mover." << endl;
+                }
+            }
+        }
+        else if (type == 'E') {
+            string lenErrStr = readN(cli, 5);
+            int lenErr = stoi(lenErrStr);
+            string desc = readN(cli, lenErr);
+            cout << "[TTT] Error: " << desc << endl;
+        }
+        else if (type == 'O') {
+            // Outcome
+            char res = readN(cli, 1)[0];
+            if (res == 'W') cout << "[TTT] ¡Has ganado!" << endl;
+            else if (res == 'L') cout << "[TTT] Has perdido." << endl;
+            else if (res == 'D') cout << "[TTT] Empate." << endl;
+            in_client_game = false;
+            my_turn = false;
+            my_symbol = '_';
         }
         else if (type == 'L') {
             int payloadSize = totalLen - 1;
@@ -109,13 +185,11 @@ void readSocketThread(int cli) {
             cout << "\nBroadcast de " << sender << ": " << mensaje << endl;
         }
         else if (type == 'f') {
-            // Recepción de archivo (servidor envía con 'f')
-            int lenDest = stoi(readN(cli, 5));
-            string dest = readN(cli, lenDest);
-            int lenName = stoi(readN(cli, 5));
-            string filename = readN(cli, lenName);
+            int lenDest    = stoi(readN(cli, 5));
+            string dest    = readN(cli, lenDest);
+            int lenName    = stoi(readN(cli, 5));
+            string filename= readN(cli, lenName);
             int lenContent = stoi(readN(cli, 18));
-
             vector<char> content(lenContent);
             int readBytes = 0;
             while (readBytes < lenContent) {
@@ -123,12 +197,14 @@ void readSocketThread(int cli) {
                 if (r <= 0) break;
                 readBytes += r;
             }
-
-            ofstream outfile(filename, ios::binary);
+            size_t punto = filename.find_last_of('.');
+            string copiaNombre = (punto == string::npos)
+                ? filename + "_copia"
+                : filename.substr(0, punto) + "_copia" + filename.substr(punto);
+            ofstream outfile(copiaNombre, ios::binary);
             outfile.write(content.data(), lenContent);
             outfile.close();
-
-            cout << "\nArchivo recibido: " << filename << endl;
+            cout << "\nArchivo recibido: " << copiaNombre << endl;
         }
         else if (type == 'q') {
             cout << "\nServidor indicó cierre de conexión." << endl;
@@ -142,6 +218,7 @@ void readSocketThread(int cli) {
 
 int main(void) {
     struct sockaddr_in stSockAddr;
+    SocketFD:
     int SocketFD = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (SocketFD < 0) {
         perror("cannot create socket");
@@ -156,6 +233,7 @@ int main(void) {
         close(SocketFD);
         exit(EXIT_FAILURE);
     }
+    mainSock = SocketFD;
 
     cout << "Introduce tu nombre de usuario: ";
     getline(cin, usuario);
@@ -171,19 +249,9 @@ int main(void) {
     thread(readSocketThread, SocketFD).detach();
 
     while (true) {
-        cout << "\nIngrese comando (mensaje, broadcast, lista, archivo o chau): ";
+        cout << "\nIngrese comando (mensaje, broadcast, lista, archivo, play, ver o chau): ";
         string entrada;
         getline(cin, entrada);
-
-        if (entrada == "archivo") {
-            cout << "Ruta del archivo: ";
-            string path; getline(cin, path);
-            cout << "Destinatario: ";
-            string dest; getline(cin, dest);
-            string fileMsg = formatFileMessage(path, dest);
-            write(SocketFD, fileMsg.c_str(), fileMsg.size());
-            continue;
-        }
 
         if (entrada == "chau") {
             write(SocketFD, "00001q", 6);
@@ -191,21 +259,46 @@ int main(void) {
             close(SocketFD);
             break;
         }
-
+        if (entrada == "ver" && spectator_request) {
+            string vMsg = formatSpectator();
+            write(SocketFD, vMsg.c_str(), vMsg.size());
+            spectator_request = false;
+            continue;
+        }
+        if (entrada == "play") {
+            if (in_client_game && my_turn) {
+                cout << "Ingresa posición (0-8): ";
+                string posStr;
+                getline(cin, posStr);
+                int pos = stoi(posStr);
+                string playMsg = formatPlayMessage(pos, my_symbol);
+                write(SocketFD, playMsg.c_str(), playMsg.size());
+                my_turn = false;
+            } else {
+                cout << "[TTT] No es tu turno o no estás en juego aún." << endl;
+            }
+            continue;
+        }
         if (entrada == "lista") {
             write(SocketFD, "00001l", 6);
             continue;
         }
-
         if (entrada == "broadcast") {
             cout << "Ingrese mensaje de broadcast: ";
-            string bMsg;
-            getline(cin, bMsg);
+            string bMsg; getline(cin, bMsg);
             string bProtocol = formatBroadcastMessage(bMsg);
             write(SocketFD, bProtocol.c_str(), bProtocol.size());
             continue;
         }
-
+        if (entrada == "archivo") {
+            cout << "Nombre del archivo: ";
+            string nombre; getline(cin, nombre);
+            cout << "Destinatario: ";
+            string dest; getline(cin, dest);
+            string fileMsg = formatFileMessage(nombre, dest);
+            write(SocketFD, fileMsg.c_str(), fileMsg.size());
+            continue;
+        }
         // Mensaje normal
         cout << "Destinatario: ";
         string destino;
