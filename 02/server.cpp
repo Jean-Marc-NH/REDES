@@ -1,3 +1,4 @@
+// server.cpp
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -28,7 +29,8 @@ int     player2_sock = -1;
 int     turn_sock = -1;         // socket del jugador que debe mover
 vector<int> spectators;
 
-// Envía exactamente n bytes\sssize_t writeN(int sockfd, const char *buf, size_t n) {
+// Envía exactamente n bytes
+ssize_t writeN(int sockfd, const char *buf, size_t n) {
     size_t total = 0;
     while (total < n) {
         ssize_t sent = write(sockfd, buf + total, n - total);
@@ -51,7 +53,7 @@ string readN(int sock, int n) {
     return result;
 }
 
-// Envío de mensajes chat ya existe:
+// Chat y envío de archivos existentes
 void broadcast(const string &mensaje, int fromSock);
 void enviarMensaje(const string &mensaje, const string &destino, int fromSock);
 void enviarLista(int cliSock);
@@ -100,7 +102,11 @@ void sendOutcome(int sock, char result) {
 }
 
 bool check_winner(char sym) {
-    int wins[8][3] = {{0,1,2},{3,4,5},{6,7,8},{0,3,6},{1,4,7},{2,5,8},{0,4,8},{2,4,6}};
+    int wins[8][3] = {
+        {0,1,2},{3,4,5},{6,7,8},
+        {0,3,6},{1,4,7},{2,5,8},
+        {0,4,8},{2,4,6}
+    };
     for (auto &w : wins) {
         if (board[w[0]] == sym && board[w[1]] == sym && board[w[2]] == sym)
             return true;
@@ -108,7 +114,8 @@ bool check_winner(char sym) {
     return false;
 }
 
-// Maneja lectura de socket por clienteoid readSocketThread(int cli) {
+// Maneja lectura de socket por cliente
+void readSocketThread(int cli) {
     while (true) {
         string header = readN(cli, 5);
         if (header.size() < 5) break;
@@ -199,8 +206,8 @@ bool check_winner(char sym) {
         else {
             // Otros protocolos: chat y archivo
             if (type == 'm' || type == 'l' || type == 'b' || type == 'F' || type == 'q') {
-                // deja pasar al manejo original
-                // ... (aquí iría tu código original para m, l, b, F, q)
+                // Aquí irá tu código original para m, l, b, F, q
+                // broadcast(...); enviarMensaje(...); enviarLista(...); forwardFile(...); etc.
             }
         }
     }
