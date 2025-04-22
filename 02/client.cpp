@@ -1,3 +1,4 @@
+// cliente.cpp
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -12,6 +13,7 @@
 #include <iomanip>
 #include <fstream>
 #include <vector>
+#include <algorithm>
 
 using namespace std;
 
@@ -76,11 +78,10 @@ string formatFileMessage(const string &filename, const string &destino) {
 }
 
 string formatSpectator() {
-    // According to server: expect payload "ver" with length header
+    // Payload "ver"
     string payload = "ver";
-    int total = payload.size(); // server reads totalLen as payload length
     stringstream ss;
-    ss << setw(5) << setfill('0') << total;
+    ss << setw(5) << setfill('0') << payload.size();
     ss << 'V';
     ss << payload;
     return ss.str();
@@ -108,9 +109,8 @@ void readSocketThread(int cli) {
         char type = typeStr[0];
 
         if (type == 'J') {
-            // Protocolo Join recibido
+            // Join protocol
             cout << "[Sistema] Protocolo Join recibido. Esperando mensaje..." << endl;
-            continue;
         }
         else if (type == 'M') {
             string lenMsgStr = readN(cli, 5);
@@ -134,7 +134,6 @@ void readSocketThread(int cli) {
             }
         }
         else if (type == 'X') {
-            // View del tablero
             string lenStr = readN(cli, 5);
             int len = stoi(lenStr);
             string boardState = readN(cli, len);
@@ -144,7 +143,6 @@ void readSocketThread(int cli) {
                 if (i % 3 == 2) cout << endl;
             }
             if (in_client_game) {
-                // determinar turno
                 int countX = count(boardState.begin(), boardState.end(), 'x');
                 int countO = count(boardState.begin(), boardState.end(), 'o');
                 char turn = (countX <= countO) ? 'x' : 'o';
@@ -161,7 +159,6 @@ void readSocketThread(int cli) {
             cout << "[TTT] Error: " << desc << endl;
         }
         else if (type == 'O') {
-            // Outcome
             char res = readN(cli, 1)[0];
             if (res == 'W') cout << "[TTT] ¡Has ganado!" << endl;
             else if (res == 'L') cout << "[TTT] Has perdido." << endl;
@@ -218,7 +215,6 @@ void readSocketThread(int cli) {
 
 int main(void) {
     struct sockaddr_in stSockAddr;
-    SocketFD:
     int SocketFD = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (SocketFD < 0) {
         perror("cannot create socket");
