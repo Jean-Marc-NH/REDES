@@ -101,8 +101,7 @@ void enviarLista(int cliSock) {
     ss << setw(5) << setfill('0') << total
        << 'L'
        << lista;
-    string data = ss.str();
-    writeN(cliSock, data.data(), data.size());
+    writeN(cliSock, ss.str().data(), ss.str().size());
 }
 
 void forwardFile(const string &dest, const string &fname, const vector<char> &content, int fromSock) {
@@ -182,30 +181,32 @@ void readSocketThread(int cli) {
         char type = readN(cli, 1)[0];
 
         if (type == 'n') {
-            // Registro de nombre
+            // Sólo registro de nombre ahora
             string nombre = readN(cli, totalLen);
-            {
-                lock_guard<mutex> lock(mtx);
-                clientes[cli] = nombre;
-            }
-            sendJoin(cli);
-
             lock_guard<mutex> lock(mtx);
+            clientes[cli] = nombre;
+            // *no* enviamos join aquí
+        }
+        else if (type == 'j') {
+            // El cliente pidió unirse con "jugar"
+            if (totalLen>0) readN(cli, totalLen);
+            lock_guard<mutex> lock(mtx);
+            sendJoin(cli);
             if (player1_sock < 0) {
                 player1_sock = cli;
-                enviarMensaje("wait", nombre, cli);
+                enviarMensaje("wait", clientes[cli], cli);
             }
             else if (player2_sock < 0) {
                 player2_sock = cli;
                 game_active = true;
                 turn_sock   = player1_sock;
                 memset(board, '_', 9);
-                enviarMensaje("start", nombre, cli);
+                enviarMensaje("start", clientes[cli], cli);
                 sendView(player1_sock);
                 sendView(player2_sock);
             }
             else {
-                enviarMensaje("quieres ver", nombre, cli);
+                enviarMensaje("quieres ver", clientes[cli], cli);
             }
         }
         else if (type == 'V') {
@@ -239,8 +240,8 @@ void readSocketThread(int cli) {
                     spectators.clear();
                 }
                 else {
-                    bool draw = true;
-                    for (char c : board) if (c=='_') { draw=false; break; }
+                    bool draw=true;
+                    for(char c:board) if(c=='_'){draw=false;break;}
                     if (draw) {
                         sendOutcome(player1_sock, 'D');
                         sendOutcome(player2_sock, 'D');
@@ -252,7 +253,7 @@ void readSocketThread(int cli) {
             }
         }
         else {
-            // Delegar chat y archivos
+            // Resto: chat y archivos (m, b, l, F, q)
             if (type == 'm') {
                 int lm = stoi(readN(cli,5));
                 string msg = readN(cli, lm);
@@ -260,30 +261,30 @@ void readSocketThread(int cli) {
                 string dst = readN(cli, ld);
                 enviarMensaje(msg, dst, cli);
             }
-            else if (type == 'b') {
+            else if(type=='b') {
                 int lm = stoi(readN(cli,5));
                 string msg = readN(cli, lm);
                 broadcast(msg, cli);
             }
-            else if (type == 'l') {
+            else if(type=='l') {
                 enviarLista(cli);
             }
-            else if (type == 'F') {
+            else if(type=='F') {
                 int ld = stoi(readN(cli,5));
                 string dst = readN(cli, ld);
                 int ln = stoi(readN(cli,5));
                 string fn = readN(cli, ln);
                 int lc = stoi(readN(cli,18));
                 vector<char> buf(lc);
-                int r = 0;
-                while (r < lc) {
-                    int k = read(cli, buf.data()+r, lc-r);
-                    if (k <= 0) break;
-                    r += k;
+                int r=0;
+                while(r<lc) {
+                    int k=read(cli,buf.data()+r,lc-r);
+                    if(k<=0) break;
+                    r+=k;
                 }
-                forwardFile(dst, fn, buf, cli);
+                forwardFile(dst,fn,buf,cli);
             }
-            else if (type == 'q') {
+            else if(type=='q') {
                 lock_guard<mutex> lock(mtx);
                 cout << clientes[cli] << " se desconectó." << endl;
                 clientes.erase(cli);
@@ -291,7 +292,7 @@ void readSocketThread(int cli) {
             }
         }
     }
-    shutdown(cli, SHUT_RDWR);
+    shutdown(cli,SHUT_RDWR);
     close(cli);
 }
 
@@ -313,9 +314,7 @@ int main() {
 
     while (true) {
         int cli = accept(SocketFD, nullptr, nullptr);
-        if (cli < 0) {
-            perror("accept"); break;
-        }
+        if (cli < 0) { perror("accept"); break; }
         thread(readSocketThread, cli).detach();
     }
 
