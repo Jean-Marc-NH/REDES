@@ -12,6 +12,8 @@
 #include <sstream>
 #include <iomanip>
 #include <mutex>
+#include <vector>
+#include <fstream>
 
 using namespace std;
 
@@ -22,7 +24,7 @@ string readN(int sock, int n) {
     string result;
     char buffer[1];
     int bytesRead;
-    while(n > 0 && (bytesRead = read(sock, buffer, 1)) > 0) {
+    while (n > 0 && (bytesRead = read(sock, buffer, 1)) > 0) {
         result.append(buffer, bytesRead);
         n -= bytesRead;
     }
@@ -52,8 +54,7 @@ void enviarMensaje(const string &mensaje, const string &destino, int fromSock) {
     int destSock = -1;
     for (auto &[cliSock, name] : clientes) {
         if (name == destino) {
-            destSock = cliSock;
-            break;
+            destSock = cliSock; break;
         }
     }
     if (destSock == -1) return;
@@ -84,6 +85,30 @@ void enviarLista(int cliSock) {
     write(cliSock, ss.str().c_str(), ss.str().size());
 }
 
+// Reenvía un archivo al destinatario (servidor usa 'f')
+void forwardFile(const string &dest, const string &filename, const vector<char> &content, int fromSock) {
+    lock_guard<mutex> lock(mtx);
+    int destSock = -1;
+    for (auto &[sock, name] : clientes) {
+        if (name == dest) { destSock = sock; break; }
+    }
+    if (destSock == -1) return;
+
+    long long contentSize = content.size();
+    long long total = 1 + 5 + dest.size() + 5 + filename.size() + 18 + contentSize;
+
+    stringstream ss;
+    ss << setw(5) << setfill('0') << total;
+    ss << 'f';
+    ss << setw(5) << setfill('0') << dest.size() << dest;
+    ss << setw(5) << setfill('0') << filename.size() << filename;
+    ss << setw(18) << setfill('0') << contentSize;
+
+    string meta = ss.str();
+    write(destSock, meta.c_str(), meta.size());
+    write(destSock, content.data(), contentSize);
+}
+
 void readSocketThread(int cli) {
     while (true) {
         string header = readN(cli, 5);
@@ -92,7 +117,7 @@ void readSocketThread(int cli) {
         string typeStr = readN(cli, 1);
         if (typeStr.size() < 1) break;
         char type = typeStr[0];
-        
+
         if (type == 'n') {
             string nombre = readN(cli, totalLen - 1);
             lock_guard<mutex> lock(mtx);
@@ -116,6 +141,24 @@ void readSocketThread(int cli) {
             int lenMsg = stoi(lenMsgStr);
             string mensaje = readN(cli, lenMsg);
             broadcast(mensaje, cli);
+        }
+        else if (type == 'F') {
+            // Cliente envía archivo (tipo 'F')
+            int lenDest = stoi(readN(cli, 5));
+            string dest = readN(cli, lenDest);
+            int lenName = stoi(readN(cli, 5));
+            string filename = readN(cli, lenName);
+            int lenContent = stoi(readN(cli, 18));
+
+            vector<char> content(lenContent);
+            int readBytes = 0;
+            while (readBytes < lenContent) {
+                int r = read(cli, content.data() + readBytes, lenContent - readBytes);
+                if (r <= 0) break;
+                readBytes += r;
+            }
+
+            forwardFile(dest, filename, content, cli);
         }
         else if (type == 'q') {
             string usuario;
