@@ -3,10 +3,10 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <thread>
 #include <iostream>
 #include <sstream>
@@ -26,281 +26,234 @@ bool my_turn = false;
 
 string readN(int sock, int n) {
     string result;
-    char buffer[1];
-    int bytesRead;
-    while(n > 0 && (bytesRead = read(sock, buffer, 1)) > 0) {
-        result.append(buffer, bytesRead);
-        n -= bytesRead;
+    result.reserve(n);
+    char c; int r;
+    while (n>0 && (r=read(sock,&c,1))>0) {
+        result.push_back(c);
+        n -= r;
     }
     return result;
 }
 
-string formatMessage(const string &mensaje, const string &destino) {
+string formatMessage(const string &msg, const string &dst) {
     stringstream ss;
-    int total = 1 + 5 + mensaje.size() + 5 + destino.size();
-    ss << setw(5) << setfill('0') << total;
-    ss << 'M';
-    ss << setw(5) << setfill('0') << mensaje.size();
-    ss << mensaje;
-    ss << setw(5) << setfill('0') << destino.size();
-    ss << destino;
+    int total = 1 + 5 + msg.size() + 5 + dst.size();
+    ss << setw(5) << setfill('0') << total
+       << 'M'
+       << setw(5) << setfill('0') << msg.size()
+       << msg
+       << setw(5) << setfill('0') << dst.size()
+       << dst;
     return ss.str();
 }
 
-string formatBroadcastMessage(const string &mensaje) {
-    int total = 1 + 5 + mensaje.size();
+string formatBroadcast(const string &msg) {
     stringstream ss;
-    ss << setw(5) << setfill('0') << total;
-    ss << 'b';
-    ss << setw(5) << setfill('0') << mensaje.size();
-    ss << mensaje;
+    int total = 1 + 5 + msg.size();
+    ss << setw(5) << setfill('0') << total
+       << 'b'
+       << setw(5) << setfill('0') << msg.size()
+       << msg;
     return ss.str();
 }
 
-string formatFileMessage(const string &filename, const string &destino) {
-    ifstream infile(filename, ios::binary);
-    vector<char> buffer((istreambuf_iterator<char>(infile)), istreambuf_iterator<char>());
-    infile.close();
-
-    long long contentSize = buffer.size();
-    long long total = 1 + 5 + destino.size() + 5 + filename.size() + 18 + contentSize;
-
+string formatFile(const string &fn, const string &dst) {
+    ifstream in(fn, ios::binary);
+    vector<char> buf((istreambuf_iterator<char>(in)), {});
+    in.close();
+    long long sz = buf.size();
+    long long total = 1 + 5 + dst.size() + 5 + fn.size() + 18 + sz;
     stringstream ss;
-    ss << setw(5) << setfill('0') << total;
-    ss << 'F';
-    ss << setw(5) << setfill('0') << destino.size() << destino;
-    ss << setw(5) << setfill('0') << filename.size() << filename;
-    ss << setw(18) << setfill('0') << contentSize;
-
-    string msg = ss.str();
-    msg.insert(msg.end(), buffer.begin(), buffer.end());
-    return msg;
+    ss << setw(5) << setfill('0') << total
+       << 'F'
+       << setw(5) << setfill('0') << dst.size() << dst
+       << setw(5) << setfill('0') << fn.size() << fn
+       << setw(18) << setfill('0') << sz;
+    string hdr = ss.str();
+    hdr.insert(hdr.end(), buf.begin(), buf.end());
+    return hdr;
 }
 
 string formatSpectator() {
-    // Payload "ver"
-    string payload = "ver";
+    // payload "ver"
+    string p = "ver";
     stringstream ss;
-    ss << setw(5) << setfill('0') << payload.size();
-    ss << 'V';
-    ss << payload;
+    ss << setw(5) << setfill('0') << p.size()
+       << 'V'
+       << p;
     return ss.str();
 }
 
-string formatPlayMessage(int pos, char sym) {
-    string posStr = to_string(pos);
-    int total = 1 + 5 + posStr.size() + 1;
+string formatJoinReq() {
+    // no payload
+    return string("00000j");
+}
+
+string formatPlay(int pos, char sym) {
+    string ps = to_string(pos);
     stringstream ss;
-    ss << setw(5) << setfill('0') << total;
-    ss << 'P';
-    ss << setw(5) << setfill('0') << posStr.size();
-    ss << posStr;
-    ss << sym;
+    int total = 1 + 5 + ps.size() + 1;
+    ss << setw(5) << setfill('0') << total
+       << 'P'
+       << setw(5) << setfill('0') << ps.size()
+       << ps
+       << sym;
     return ss.str();
 }
 
-void readSocketThread(int cli) {
+void readSocketThread(int sock) {
     while (true) {
-        string header = readN(cli, 5);
-        if (header.size() < 5) break;
-        int totalLen = stoi(header);
-        string typeStr = readN(cli, 1);
-        if (typeStr.size() < 1) break;
-        char type = typeStr[0];
+        string h = readN(sock,5);
+        if (h.size()<5) break;
+        int totalLen = stoi(h);
+        char type = readN(sock,1)[0];
 
-        if (type == 'J') {
-            // Join protocol
-            cout << "[Sistema] Protocolo Join recibido. Esperando mensaje..." << endl;
+        if (type=='J') {
+            cout<<"[Sistema] JOIN confirmado, esperando…”"<<endl;
         }
-        else if (type == 'M') {
-            string lenMsgStr = readN(cli, 5);
-            int lenMsg = stoi(lenMsgStr);
-            string mensaje = readN(cli, lenMsg);
-            string lenSenderStr = readN(cli, 5);
-            int lenSender = stoi(lenSenderStr);
-            string sender = readN(cli, lenSender);
-            cout << "\nMensaje de " << sender << ": " << mensaje << endl;
-            if (mensaje == "wait") {
-                in_client_game = true;
-                my_symbol = 'x';
-                cout << "[TTT] Eres jugador X. Esperando segundo jugador..." << endl;
-            } else if (mensaje == "start") {
-                in_client_game = true;
-                my_symbol = 'o';
-                cout << "[TTT] Jugadores listos. Eres jugador O." << endl;
-            } else if (mensaje == "quieres ver") {
-                spectator_request = true;
-                cout << "[TTT] El servidor ofrece ser espectador. Escribe 'ver' para aceptar." << endl;
+        else if (type=='M') {
+            int lm = stoi(readN(sock,5));
+            string msg = readN(sock,lm);
+            int ls = stoi(readN(sock,5));
+            string snd = readN(sock,ls);
+            cout<<"\nMensaje de "<<snd<<": "<<msg<<endl;
+            if (msg=="wait") {
+                in_client_game=true; my_symbol='x';
+                cout<<"[TTT] Eres X, esperando rival…"<<endl;
+            }
+            else if (msg=="start") {
+                in_client_game=true; my_symbol='o';
+                cout<<"[TTT] Ya puedes jugar, eres O."<<endl;
+            }
+            else if (msg=="quieres ver") {
+                spectator_request=true;
+                cout<<"[TTT] Oferta espectador: escribe 'ver'."<<endl;
             }
         }
-        else if (type == 'X') {
-            string lenStr = readN(cli, 5);
-            int len = stoi(lenStr);
-            string boardState = readN(cli, len);
-            cout << "\n[TTT] Estado del tablero:" << endl;
-            for (int i = 0; i < 9; ++i) {
-                cout << (boardState[i] == '_' ? '.' : boardState[i]) << ' ';
-                if (i % 3 == 2) cout << endl;
+        else if (type=='X') {
+            int ln = stoi(readN(sock,5));
+            string bs = readN(sock,ln);
+            cout<<"\n[TTT] Tablero:"<<endl;
+            for(int i=0;i<9;i++){
+                cout<<(bs[i]=='_'?'.':bs[i])<<' ';
+                if(i%3==2) cout<<endl;
             }
-            if (in_client_game) {
-                int countX = count(boardState.begin(), boardState.end(), 'x');
-                int countO = count(boardState.begin(), boardState.end(), 'o');
-                char turn = (countX <= countO) ? 'x' : 'o';
-                if (turn == my_symbol) {
-                    my_turn = true;
-                    cout << "[TTT] Tu turno. Escribe 'play' para mover." << endl;
+            if(in_client_game){
+                int cx=count(bs.begin(),bs.end(),'x');
+                int co=count(bs.begin(),bs.end(),'o');
+                char turn = (cx<=co?'x':'o');
+                if(turn==my_symbol){
+                    my_turn=true;
+                    cout<<"[TTT] Tu turno: escribe 'play'."<<endl;
                 }
             }
         }
-        else if (type == 'E') {
-            string lenErrStr = readN(cli, 5);
-            int lenErr = stoi(lenErrStr);
-            string desc = readN(cli, lenErr);
-            cout << "[TTT] Error: " << desc << endl;
+        else if(type=='E') {
+            int le=stoi(readN(sock,5));
+            string d=readN(sock,le);
+            cout<<"[TTT] Error: "<<d<<endl;
         }
-        else if (type == 'O') {
-            char res = readN(cli, 1)[0];
-            if (res == 'W') cout << "[TTT] ¡Has ganado!" << endl;
-            else if (res == 'L') cout << "[TTT] Has perdido." << endl;
-            else if (res == 'D') cout << "[TTT] Empate." << endl;
-            in_client_game = false;
-            my_turn = false;
-            my_symbol = '_';
+        else if(type=='O') {
+            char r = readN(sock,1)[0];
+            if(r=='W') cout<<"[TTT] ¡Ganaste!"<<endl;
+            else if(r=='L') cout<<"[TTT] Perdiste."<<endl;
+            else if(r=='D') cout<<"[TTT] Empate."<<endl;
+            in_client_game=false; my_turn=false; my_symbol='_';
         }
-        else if (type == 'L') {
-            int payloadSize = totalLen - 1;
-            string lista = readN(cli, payloadSize);
-            cout << "\nUsuarios conectados: " << lista << endl;
+        else if(type=='L') {
+            string ls = readN(sock,totalLen-1);
+            cout<<"\nUsuarios: "<<ls<<endl;
         }
-        else if (type == 'b') {
-            string lenMsgStr = readN(cli, 5);
-            int lenMsg = stoi(lenMsgStr);
-            string lenSenderStr = readN(cli, 5);
-            int lenSender = stoi(lenSenderStr);
-            string sender = readN(cli, lenSender);
-            string mensaje = readN(cli, lenMsg);
-            cout << "\nBroadcast de " << sender << ": " << mensaje << endl;
+        else if(type=='b') {
+            int lm=stoi(readN(sock,5));
+            int ls=stoi(readN(sock,5));
+            string snd=readN(sock,ls);
+            string msg=readN(sock,lm);
+            cout<<"\nBroadcast de "<<snd<<": "<<msg<<endl;
         }
-        else if (type == 'f') {
-            int lenDest    = stoi(readN(cli, 5));
-            string dest    = readN(cli, lenDest);
-            int lenName    = stoi(readN(cli, 5));
-            string filename= readN(cli, lenName);
-            int lenContent = stoi(readN(cli, 18));
-            vector<char> content(lenContent);
-            int readBytes = 0;
-            while (readBytes < lenContent) {
-                int r = read(cli, content.data() + readBytes, lenContent - readBytes);
-                if (r <= 0) break;
-                readBytes += r;
-            }
-            size_t punto = filename.find_last_of('.');
-            string copiaNombre = (punto == string::npos)
-                ? filename + "_copia"
-                : filename.substr(0, punto) + "_copia" + filename.substr(punto);
-            ofstream outfile(copiaNombre, ios::binary);
-            outfile.write(content.data(), lenContent);
-            outfile.close();
-            cout << "\nArchivo recibido: " << copiaNombre << endl;
+        else if(type=='f') {
+            int ld=stoi(readN(sock,5));
+            readN(sock,ld); //dest
+            int ln=stoi(readN(sock,5));
+            string fn=readN(sock,ln);
+            int lc=stoi(readN(sock,18));
+            vector<char> buf(lc);
+            int r=0;
+            while(r<lc){int k=read(sock,buf.data()+r,lc-r); if(k<=0)break; r+=k;}
+            size_t p=fn.find_last_of('.');
+            string out = (p==string::npos? fn+"_copia": fn.substr(0,p)+"_copia"+fn.substr(p));
+            ofstream o(out,ios::binary);
+            o.write(buf.data(),lc);
+            o.close();
+            cout<<"\nArchivo recibido: "<<out<<endl;
         }
-        else if (type == 'q') {
-            cout << "\nServidor indicó cierre de conexión." << endl;
+        else if(type=='q') {
+            cout<<"\nServidor cerró conexión."<<endl;
             break;
         }
     }
-    shutdown(cli, SHUT_RDWR);
-    close(cli);
+    shutdown(sock,SHUT_RDWR);
+    close(sock);
     exit(0);
 }
 
-int main(void) {
-    struct sockaddr_in stSockAddr;
-    int SocketFD = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (SocketFD < 0) {
-        perror("cannot create socket");
-        exit(EXIT_FAILURE);
+int main(){
+    sockaddr_in addr{};
+    int sock = socket(PF_INET,SOCK_STREAM,0);
+    addr.sin_family=AF_INET;
+    addr.sin_port=htons(45000);
+    inet_pton(AF_INET,"127.0.0.1",&addr.sin_addr);
+    if(connect(sock,(sockaddr*)&addr,sizeof(addr))<0){
+        perror("connect"); exit(1);
     }
-    memset(&stSockAddr, 0, sizeof(stSockAddr));
-    stSockAddr.sin_family = AF_INET;
-    stSockAddr.sin_port = htons(45000);
-    inet_pton(AF_INET, "127.0.0.1", &stSockAddr.sin_addr);
-    if (connect(SocketFD, (struct sockaddr *)&stSockAddr, sizeof(stSockAddr)) < 0) {
-        perror("connect failed");
-        close(SocketFD);
-        exit(EXIT_FAILURE);
+    mainSock=sock;
+
+    cout<<"Usuario: "; getline(cin,usuario);
+    stringstream ss;
+    ss<<setw(5)<<setfill('0')<<usuario.size()
+      <<'n'
+      <<usuario;
+    write(sock,ss.str().c_str(),ss.str().size());
+
+    thread(readSocketThread,sock).detach();
+
+    while(true){
+        cout<<"\nComando (mensaje, broadcast, lista, archivo, jugar, play, ver, chau): ";
+        string e; getline(cin,e);
+
+        if(e=="chau"){ write(sock,"00001q",6); break; }
+        if(e=="jugar"){ write(sock,formatJoinReq().c_str(),5+1); continue; }
+        if(e=="ver" && spectator_request){
+            write(sock,formatSpectator().c_str(),formatSpectator().size());
+            spectator_request=false;
+            continue;
+        }
+        if(e=="play"){
+            if(in_client_game && my_turn){
+                cout<<"Pos(0-8): "; string p; getline(cin,p);
+                write(sock,formatPlay(stoi(p),my_symbol).c_str(),formatPlay(stoi(p),my_symbol).size());
+                my_turn=false;
+            } else cout<<"[TTT] No es tu turno o no estás en juego.\n";
+            continue;
+        }
+        if(e=="lista"){ write(sock,"00001l",6); continue; }
+        if(e=="broadcast"){
+            cout<<"Msg: "; string m; getline(cin,m);
+            write(sock,formatBroadcast(m).c_str(),formatBroadcast(m).size());
+            continue;
+        }
+        if(e=="archivo"){
+            cout<<"Fichero: "; string fn; getline(cin,fn);
+            cout<<"Para: ";    string dst; getline(cin,dst);
+            write(sock,formatFile(fn,dst).c_str(),formatFile(fn,dst).size());
+            continue;
+        }
+        // si no es ninguno, es mensaje directo
+        cout<<"Para: "; string dst; getline(cin,dst);
+        write(sock,formatMessage(e,dst).c_str(),formatMessage(e,dst).size());
     }
-    mainSock = SocketFD;
 
-    cout << "Introduce tu nombre de usuario: ";
-    getline(cin, usuario);
-    {
-        stringstream ss;
-        ss << setw(5) << setfill('0') << usuario.size();
-        ss << 'n';
-        ss << usuario;
-        string loginMsg = ss.str();
-        write(SocketFD, loginMsg.c_str(), loginMsg.size());
-    }
-
-    thread(readSocketThread, SocketFD).detach();
-
-    while (true) {
-        cout << "\nIngrese comando (mensaje, broadcast, lista, archivo, play, ver o chau): ";
-        string entrada;
-        getline(cin, entrada);
-
-        if (entrada == "chau") {
-            write(SocketFD, "00001q", 6);
-            shutdown(SocketFD, SHUT_RDWR);
-            close(SocketFD);
-            break;
-        }
-        if (entrada == "ver" && spectator_request) {
-            string vMsg = formatSpectator();
-            write(SocketFD, vMsg.c_str(), vMsg.size());
-            spectator_request = false;
-            continue;
-        }
-        if (entrada == "play") {
-            if (in_client_game && my_turn) {
-                cout << "Ingresa posición (0-8): ";
-                string posStr;
-                getline(cin, posStr);
-                int pos = stoi(posStr);
-                string playMsg = formatPlayMessage(pos, my_symbol);
-                write(SocketFD, playMsg.c_str(), playMsg.size());
-                my_turn = false;
-            } else {
-                cout << "[TTT] No es tu turno o no estás en juego aún." << endl;
-            }
-            continue;
-        }
-        if (entrada == "lista") {
-            write(SocketFD, "00001l", 6);
-            continue;
-        }
-        if (entrada == "broadcast") {
-            cout << "Ingrese mensaje de broadcast: ";
-            string bMsg; getline(cin, bMsg);
-            string bProtocol = formatBroadcastMessage(bMsg);
-            write(SocketFD, bProtocol.c_str(), bProtocol.size());
-            continue;
-        }
-        if (entrada == "archivo") {
-            cout << "Nombre del archivo: ";
-            string nombre; getline(cin, nombre);
-            cout << "Destinatario: ";
-            string dest; getline(cin, dest);
-            string fileMsg = formatFileMessage(nombre, dest);
-            write(SocketFD, fileMsg.c_str(), fileMsg.size());
-            continue;
-        }
-        // Mensaje normal
-        cout << "Destinatario: ";
-        string destino;
-        getline(cin, destino);
-        string normalMsg = formatMessage(entrada, destino);
-        write(SocketFD, normalMsg.c_str(), normalMsg.size());
-    }
+    shutdown(sock,SHUT_RDWR);
+    close(sock);
     return 0;
 }
