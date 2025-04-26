@@ -5,150 +5,169 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <cstdio>      // para snprintf
 #include <unistd.h>
 #include <thread>
 #include <iostream>
 #include <map>
+#include <sstream>
+#include <iomanip>
 #include <mutex>
 #include <vector>
 #include <fstream>
 
-std::mutex mtx;
-std::map<int, std::string> clientes;
+using namespace std;
 
-std::string readN(int sock, size_t n) {
-    std::string result;
-    result.reserve(n);
-    char buf[1];
-    while (n > 0) {
-        int r = read(sock, buf, 1);
-        if (r <= 0) break;
-        result.append(buf, r);
-        n -= r;
+map<int, string> clientes;
+mutex mtx;
+
+string readN(int sock, int n) {
+    string result;
+    char buffer[1];
+    int bytesRead;
+    while (n > 0 && (bytesRead = read(sock, buffer, 1)) > 0) {
+        result.append(buffer, bytesRead);
+        n -= bytesRead;
     }
     return result;
 }
 
-void enviarMensaje(const std::string &mensaje, const std::string &destino, int fromSock) {
-    std::lock_guard<std::mutex> lock(mtx);
-    int destSock = -1;
-    for (auto &[cliSock, name] : clientes) {
-        if (name == destino) { destSock = cliSock; break; }
-    }
-    if (destSock < 0) return;
-
-    int total = 1 + 5 + mensaje.size() + 5 + destino.size();
-    std::vector<char> buf(total);
-    int len = std::snprintf(buf.data(), buf.size(), "%05d%c%05zu%.*s%05zu%.*s",
-                            total, 'm',
-                            mensaje.size(), (int)mensaje.size(), mensaje.c_str(),
-                            destino.size(), (int)destino.size(), destino.c_str());
-    write(destSock, buf.data(), len);
-}
-
-void broadcast(const std::string &mensaje, int fromSock) {
-    std::lock_guard<std::mutex> lock(mtx);
-    std::string sender = clientes[fromSock];
-    int total = 1 + 5 + mensaje.size() + 5 + sender.size();
-    std::vector<char> buf(total);
-    int len = std::snprintf(buf.data(), buf.size(), "%05d%c%05zu%.*s%05zu%.*s",
-                            total, 'b',
-                            mensaje.size(), (int)mensaje.size(), mensaje.c_str(),
-                            sender.size(), (int)sender.size(), sender.c_str());
+void broadcast(const string &mensaje, int fromSock) {
+    lock_guard<mutex> lock(mtx);
+    string sender = clientes[fromSock];
+    int total = 1 + 5 + 5 + sender.size() + mensaje.size();
+    stringstream ss;
+    ss << setw(5) << setfill('0') << total;
+    ss << 'b';
+    ss << setw(5) << setfill('0') << mensaje.size();
+    ss << setw(5) << setfill('0') << sender.size();
+    ss << sender;
+    ss << mensaje;
     for (auto &[cliSock, name] : clientes) {
         if (cliSock != fromSock) {
-            write(cliSock, buf.data(), len);
+            write(cliSock, ss.str().c_str(), ss.str().size());
         }
     }
 }
 
-void enviarLista(int cliSock) {
-    std::lock_guard<std::mutex> lock(mtx);
-    std::string lista;
-    for (auto &[sock, name] : clientes) {
-        lista += name + " ";
+void enviarMensaje(const string &mensaje, const string &destino, int fromSock) {
+    lock_guard<mutex> lock(mtx);
+    int destSock = -1;
+    for (auto &[cliSock, name] : clientes) {
+        if (name == destino) {
+            destSock = cliSock; break;
+        }
     }
-    int total = 1 + lista.size();
-    std::vector<char> buf(total);
-    int len = std::snprintf(buf.data(), buf.size(), "%05d%c%s",
-                            total, 'l', lista.c_str());
-    write(cliSock, buf.data(), len);
+    if (destSock == -1) return;
+    string sender = clientes[fromSock];
+    int total = 1 + 5 + mensaje.size() + 5 + sender.size();
+    stringstream ss;
+    ss << setw(5) << setfill('0') << total;
+    ss << 'M';
+    ss << setw(5) << setfill('0') << mensaje.size();
+    ss << mensaje;
+    ss << setw(5) << setfill('0') << sender.size();
+    ss << sender;
+    write(destSock, ss.str().c_str(), ss.str().size());
 }
 
-void forwardFile(const std::string &dest, const std::string &filename, const std::vector<char> &content, int fromSock) {
-    std::lock_guard<std::mutex> lock(mtx);
+void enviarLista(int cliSock) {
+    lock_guard<mutex> lock(mtx);
+    stringstream ssLista;
+    for (auto &[sock, name] : clientes) {
+        ssLista << name << " ";
+    }
+    string lista = ssLista.str();
+    int total = 1 + lista.size();
+    stringstream ss;
+    ss << setw(5) << setfill('0') << total;
+    ss << 'L';
+    ss << lista;
+    write(cliSock, ss.str().c_str(), ss.str().size());
+}
+
+// Reenvía un archivo al destinatario (servidor usa 'f')
+void forwardFile(const string &dest, const string &filename, const vector<char> &content, int fromSock) {
+    lock_guard<mutex> lock(mtx);
     int destSock = -1;
     for (auto &[sock, name] : clientes) {
         if (name == dest) { destSock = sock; break; }
     }
-    if (destSock < 0) return;
+    if (destSock == -1) return;
 
     long long contentSize = content.size();
     long long total = 1 + 5 + dest.size() + 5 + filename.size() + 18 + contentSize;
-    std::vector<char> buf(total);
-    int headerLen = std::snprintf(buf.data(), buf.size(), "%05lld%c%05zu%.*s%05zu%.*s%018lld",
-                                   total, 'f',
-                                   dest.size(), (int)dest.size(), dest.c_str(),
-                                   filename.size(), (int)filename.size(), filename.c_str(),
-                                   contentSize);
-    std::memcpy(buf.data() + headerLen, content.data(), contentSize);
-    write(destSock, buf.data(), headerLen + contentSize);
+
+    stringstream ss;
+    ss << setw(5) << setfill('0') << total;
+    ss << 'f';
+    ss << setw(5) << setfill('0') << dest.size() << dest;
+    ss << setw(5) << setfill('0') << filename.size() << filename;
+    ss << setw(18) << setfill('0') << contentSize;
+
+    string meta = ss.str();
+    write(destSock, meta.c_str(), meta.size());
+    write(destSock, content.data(), contentSize);
 }
 
 void readSocketThread(int cli) {
     while (true) {
-        std::string header = readN(cli, 5);
+        string header = readN(cli, 5);
         if (header.size() < 5) break;
-        int totalLen = std::stoi(header);
-        std::string typeStr = readN(cli, 1);
+        int totalLen = stoi(header);
+        string typeStr = readN(cli, 1);
         if (typeStr.size() < 1) break;
         char type = typeStr[0];
 
         if (type == 'n') {
-            std::string nombre = readN(cli, totalLen);
-            std::lock_guard<std::mutex> lock(mtx);
+            string nombre = readN(cli, totalLen);
+            lock_guard<mutex> lock(mtx);
             clientes[cli] = nombre;
-            std::cout << nombre << " se ha conectado." << std::endl;
+            cout << nombre << " se ha conectado." << endl;
         }
         else if (type == 'm') {
-            int lenMsg = std::stoi(readN(cli, 5));
-            std::string mensaje = readN(cli, lenMsg);
-            int lenDest = std::stoi(readN(cli, 5));
-            std::string destino = readN(cli, lenDest);
+            string lenMsgStr = readN(cli, 5);
+            int lenMsg = stoi(lenMsgStr);
+            string mensaje = readN(cli, lenMsg);
+            string lenDestStr = readN(cli, 5);
+            int lenDest = stoi(lenDestStr);
+            string destino = readN(cli, lenDest);
             enviarMensaje(mensaje, destino, cli);
-        }
-        else if (type == 'b') {
-            int lenMsg = std::stoi(readN(cli, 5));
-            std::string mensaje = readN(cli, lenMsg);
-            broadcast(mensaje, cli);
         }
         else if (type == 'l') {
             enviarLista(cli);
         }
+        else if (type == 'b') {
+            string lenMsgStr = readN(cli, 5);
+            int lenMsg = stoi(lenMsgStr);
+            string mensaje = readN(cli, lenMsg);
+            broadcast(mensaje, cli);
+        }
         else if (type == 'F') {
-            int lenDest = std::stoi(readN(cli, 5));
-            std::string dest = readN(cli, lenDest);
-            int lenName = std::stoi(readN(cli, 5));
-            std::string filename = readN(cli, lenName);
-            int lenContent = std::stoi(readN(cli, 18));
-            std::vector<char> content(lenContent);
+            // Cliente envía archivo (tipo 'F')
+            int lenDest = stoi(readN(cli, 5));
+            string dest = readN(cli, lenDest);
+            int lenName = stoi(readN(cli, 5));
+            string filename = readN(cli, lenName);
+            int lenContent = stoi(readN(cli, 18));
+
+            vector<char> content(lenContent);
             int readBytes = 0;
             while (readBytes < lenContent) {
                 int r = read(cli, content.data() + readBytes, lenContent - readBytes);
                 if (r <= 0) break;
                 readBytes += r;
             }
+
             forwardFile(dest, filename, content, cli);
         }
         else if (type == 'q') {
-            std::string usuario;
+            string usuario;
             {
-                std::lock_guard<std::mutex> lock(mtx);
+                lock_guard<mutex> lock(mtx);
                 usuario = clientes[cli];
                 clientes.erase(cli);
             }
-            std::cout << usuario << " se ha desconectado." << std::endl;
+            cout << usuario << " se ha desconectado." << endl;
             break;
         }
     }
