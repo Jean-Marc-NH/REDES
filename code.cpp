@@ -1,4 +1,221 @@
-# Server (SERVER.CPP)
+// Server (SERVER.CPP)
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <thread>
+#include <iostream>
+#include <map>
+#include <mutex>
+#include <vector>
+#include <fstream>
+
+using namespace std;
+
+map<int, string> clientes;
+mutex mtx;
+
+string readN(int sock, int n) {
+    string result;
+    char buffer[1];
+    int bytesRead;
+    while (n > 0 && (bytesRead = read(sock, buffer, 1)) > 0) {
+        result.append(buffer, bytesRead);
+        n -= bytesRead;
+    }
+    return result;
+}
+
+void broadcast(const string &mensaje, int fromSock) {
+    lock_guard<mutex> lock(mtx);
+    string sender = clientes[fromSock];
+    int total = 1 + 5 + 5 + sender.size() + mensaje.size();
+    char buf[32];
+    sprintf(buf, "%05d", total);
+    string meta = buf;
+    meta += 'b';
+    sprintf(buf, "%05d", (int)mensaje.size());
+    meta += buf;
+    sprintf(buf, "%05d", (int)sender.size());
+    meta += buf;
+    meta += sender;
+    meta += mensaje;
+    for (auto &[cliSock, name] : clientes) {
+        if (cliSock != fromSock) {
+            write(cliSock, meta.c_str(), meta.size());
+        }
+    }
+}
+
+void enviarMensaje(const string &mensaje, const string &destino, int fromSock) {
+    lock_guard<mutex> lock(mtx);
+    int destSock = -1;
+    for (auto &[cliSock, name] : clientes) {
+        if (name == destino) {
+            destSock = cliSock;
+            break;
+        }
+    }
+    if (destSock == -1) return;
+    string sender = clientes[fromSock];
+    int total = 1 + 5 + mensaje.size() + 5 + sender.size();
+    char buf[32];
+    sprintf(buf, "%05d", total);
+    string meta = buf;
+    meta += 'M';
+    sprintf(buf, "%05d", (int)mensaje.size());
+    meta += buf;
+    meta += mensaje;
+    sprintf(buf, "%05d", (int)sender.size());
+    meta += buf;
+    meta += sender;
+    write(destSock, meta.c_str(), meta.size());
+}
+
+void enviarLista(int cliSock) {
+    lock_guard<mutex> lock(mtx);
+    string lista;
+    for (auto &[sock, name] : clientes) {
+        lista += name + " ";
+    }
+    int total = 1 + lista.size();
+    char buf[32];
+    sprintf(buf, "%05d", total);
+    string meta = buf;
+    meta += 'L';
+    meta += lista;
+    write(cliSock, meta.c_str(), meta.size());
+}
+
+void forwardFile(const string &dest, const string &filename, const vector<char> &content, int fromSock) {
+    lock_guard<mutex> lock(mtx);
+    int destSock = -1;
+    for (auto &[sock, name] : clientes) {
+        if (name == dest) {
+            destSock = sock;
+            break;
+        }
+    }
+    if (destSock == -1) return;
+
+    long long contentSize = content.size();
+    long long total = 1 + 5 + dest.size() + 5 + filename.size() + 18 + contentSize;
+    char buf[32];
+    sprintf(buf, "%05lld", total);
+    string meta = buf;
+    meta += 'f';
+    sprintf(buf, "%05d", (int)dest.size());
+    meta += buf;
+    meta += dest;
+    sprintf(buf, "%05d", (int)filename.size());
+    meta += buf;
+    meta += filename;
+    sprintf(buf, "%018lld", contentSize);
+    meta += buf;
+
+    write(destSock, meta.c_str(), meta.size());
+    write(destSock, content.data(), contentSize);
+}
+
+void readSocketThread(int cli) {
+    while (true) {
+        string header = readN(cli, 5);
+        if (header.size() < 5) break;
+        int totalLen = stoi(header);
+        string typeStr = readN(cli, 1);
+        if (typeStr.size() < 1) break;
+        char type = typeStr[0];
+
+        if (type == 'n') {
+            string nombre = readN(cli, totalLen);
+            lock_guard<mutex> lock(mtx);
+            clientes[cli] = nombre;
+            printf("%s se ha conectado.\n", nombre.c_str());
+        }
+        else if (type == 'm') {
+            int lenMsg = stoi(readN(cli, 5));
+            string mensaje = readN(cli, lenMsg);
+            int lenDest = stoi(readN(cli, 5));
+            string destino = readN(cli, lenDest);
+            enviarMensaje(mensaje, destino, cli);
+        }
+        else if (type == 'l') {
+            enviarLista(cli);
+        }
+        else if (type == 'b') {
+            int lenMsg = stoi(readN(cli, 5));
+            string mensaje = readN(cli, lenMsg);
+            broadcast(mensaje, cli);
+        }
+        else if (type == 'F') {
+            int lenDest = stoi(readN(cli, 5));
+            string dest = readN(cli, lenDest);
+            int lenName = stoi(readN(cli, 5));
+            string filename = readN(cli, lenName);
+            int lenContent = stoi(readN(cli, 18));
+
+            vector<char> content(lenContent);
+            int readBytes = 0;
+            while (readBytes < lenContent) {
+                int r = read(cli, content.data() + readBytes, lenContent - readBytes);
+                if (r <= 0) break;
+                readBytes += r;
+            }
+
+            forwardFile(dest, filename, content, cli);
+        }
+        else if (type == 'q') {
+            string usuario;
+            {
+                lock_guard<mutex> lock(mtx);
+                usuario = clientes[cli];
+                clientes.erase(cli);
+            }
+            printf("%s se ha desconectado.\n", usuario.c_str());
+            break;
+        }
+    }
+    shutdown(cli, SHUT_RDWR);
+    close(cli);
+}
+
+int main(void) {
+    struct sockaddr_in stSockAddr;
+    int SocketFD = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (SocketFD < 0) {
+        perror("cannot create socket");
+        exit(EXIT_FAILURE);
+    }
+    memset(&stSockAddr, 0, sizeof(stSockAddr));
+    stSockAddr.sin_family = AF_INET;
+    stSockAddr.sin_port = htons(45000);
+    stSockAddr.sin_addr.s_addr = INADDR_ANY;
+    if (bind(SocketFD, (struct sockaddr *)&stSockAddr, sizeof(struct sockaddr_in)) < 0) {
+        perror("bind failed");
+        close(SocketFD);
+        exit(EXIT_FAILURE);
+    }
+    if (listen(SocketFD, 10) < 0) {
+        perror("listen failed");
+        close(SocketFD);
+        exit(EXIT_FAILURE);
+    }
+    while (true) {
+        int ConnectFD = accept(SocketFD, NULL, NULL);
+        if (ConnectFD < 0) {
+            perror("accept failed");
+            close(SocketFD);
+            exit(EXIT_FAILURE);
+        }
+        thread(readSocketThread, ConnectFD).detach();
+    }
+    close(SocketFD);
+    return 0;
+}
 
 // Client (CLIENT.CPP)
 #include <sys/types.h>
