@@ -8,17 +8,14 @@
 #include <unistd.h>
 #include <thread>
 #include <iostream>
-#include <map>
 #include <sstream>
 #include <iomanip>
-#include <mutex>
-#include <vector>
 #include <fstream>
+#include <vector>
 
 using namespace std;
 
-map<int, string> clientes;
-mutex mtx;
+string usuario;
 
 string readN(int sock, int n) {
     string result;
@@ -31,82 +28,48 @@ string readN(int sock, int n) {
     return result;
 }
 
-void broadcast(const string &mensaje, int fromSock) {
-    lock_guard<mutex> lock(mtx);
-    string sender = clientes[fromSock];
-    int total = 1 + 5 + 5 + sender.size() + mensaje.size();
+string formatMessage(const string &mensaje, const string &destino) {
+    stringstream ss;
+    int total = 1 + 5 + mensaje.size() + 5 + destino.size();
+    ss << setw(5) << setfill('0') << total;
+    ss << 'm';
+    ss << setw(5) << setfill('0') << mensaje.size();
+    ss << mensaje;
+    ss << setw(5) << setfill('0') << destino.size();
+    ss << destino;
+    return ss.str();
+}
+
+string formatBroadcastMessage(const string &mensaje) {
+    int total = 1 + 5 + mensaje.size();
     stringstream ss;
     ss << setw(5) << setfill('0') << total;
     ss << 'b';
     ss << setw(5) << setfill('0') << mensaje.size();
-    ss << setw(5) << setfill('0') << sender.size();
-    ss << sender;
     ss << mensaje;
-    for (auto &[cliSock, name] : clientes) {
-        if (cliSock != fromSock) {
-            write(cliSock, ss.str().c_str(), ss.str().size());
-        }
-    }
+    return ss.str();
 }
 
-void enviarMensaje(const string &mensaje, const string &destino, int fromSock) {
-    lock_guard<mutex> lock(mtx);
-    int destSock = -1;
-    for (auto &[cliSock, name] : clientes) {
-        if (name == destino) {
-            destSock = cliSock; break;
-        }
-    }
-    if (destSock == -1) return;
-    string sender = clientes[fromSock];
-    int total = 1 + 5 + mensaje.size() + 5 + sender.size();
-    stringstream ss;
-    ss << setw(5) << setfill('0') << total;
-    ss << 'M';
-    ss << setw(5) << setfill('0') << mensaje.size();
-    ss << mensaje;
-    ss << setw(5) << setfill('0') << sender.size();
-    ss << sender;
-    write(destSock, ss.str().c_str(), ss.str().size());
-}
+string formatFileMessage(const string &filename, const string &destino) {
+    ifstream infile(filename, ios::binary);
+    vector<char> buffer((istreambuf_iterator<char>(infile)), istreambuf_iterator<char>());
+    infile.close();
 
-void enviarLista(int cliSock) {
-    lock_guard<mutex> lock(mtx);
-    stringstream ssLista;
-    for (auto &[sock, name] : clientes) {
-        ssLista << name << " ";
-    }
-    string lista = ssLista.str();
-    int total = 1 + lista.size();
-    stringstream ss;
-    ss << setw(5) << setfill('0') << total;
-    ss << 'L';
-    ss << lista;
-    write(cliSock, ss.str().c_str(), ss.str().size());
-}
-
-// Reenvía un archivo al destinatario (servidor usa 'f')
-void forwardFile(const string &dest, const string &filename, const vector<char> &content, int fromSock) {
-    lock_guard<mutex> lock(mtx);
-    int destSock = -1;
-    for (auto &[sock, name] : clientes) {
-        if (name == dest) { destSock = sock; break; }
-    }
-    if (destSock == -1) return;
-
-    long long contentSize = content.size();
-    long long total = 1 + 5 + dest.size() + 5 + filename.size() + 18 + contentSize;
+    long long contentSize = buffer.size();
+    long long total = 1 + 5 + destino.size() + 5 + filename.size() + 18 + contentSize;
 
     stringstream ss;
     ss << setw(5) << setfill('0') << total;
-    ss << 'f';
-    ss << setw(5) << setfill('0') << dest.size() << dest;
-    ss << setw(5) << setfill('0') << filename.size() << filename;
+    ss << 'F';
+    ss << setw(5) << setfill('0') << destino.size();
+    ss << destino;
+    ss << setw(5) << setfill('0') << filename.size();
+    ss << filename;
     ss << setw(18) << setfill('0') << contentSize;
 
-    string meta = ss.str();
-    write(destSock, meta.c_str(), meta.size());
-    write(destSock, content.data(), contentSize);
+    string msg = ss.str();
+    msg.insert(msg.end(), buffer.begin(), buffer.end());
+    return msg;
 }
 
 void readSocketThread(int cli) {
@@ -115,35 +78,28 @@ void readSocketThread(int cli) {
         if (header.size() < 5) break;
         int totalLen = stoi(header);
         string typeStr = readN(cli, 1);
-        if (typeStr.size() < 1) break;
+        if (typeStr.empty()) break;
         char type = typeStr[0];
 
-        if (type == 'n') {
-            string nombre = readN(cli, totalLen);
-            lock_guard<mutex> lock(mtx);
-            clientes[cli] = nombre;
-            cout << nombre << " se ha conectado." << endl;
-        }
-        else if (type == 'm') {
-            string lenMsgStr = readN(cli, 5);
-            int lenMsg = stoi(lenMsgStr);
+        if (type == 'M') {
+            int lenMsg = stoi(readN(cli, 5));
             string mensaje = readN(cli, lenMsg);
-            string lenDestStr = readN(cli, 5);
-            int lenDest = stoi(lenDestStr);
-            string destino = readN(cli, lenDest);
-            enviarMensaje(mensaje, destino, cli);
-        }
-        else if (type == 'l') {
-            enviarLista(cli);
-        }
-        else if (type == 'b') {
-            string lenMsgStr = readN(cli, 5);
-            int lenMsg = stoi(lenMsgStr);
+            int lenSender = stoi(readN(cli, 5));
+            string sender = readN(cli, lenSender);
+            cout << "\nMensaje de " << sender << ": " << mensaje << endl;
+
+        } else if (type == 'L') {
+            string lista = readN(cli, totalLen - 1);
+            cout << "\nUsuarios conectados: " << lista << endl;
+
+        } else if (type == 'b') {
+            int lenMsg = stoi(readN(cli, 5));
+            int lenSender = stoi(readN(cli, 5));
+            string sender = readN(cli, lenSender);
             string mensaje = readN(cli, lenMsg);
-            broadcast(mensaje, cli);
-        }
-        else if (type == 'F') {
-            // Cliente envía archivo (tipo 'F')
+            cout << "\nBroadcast de " << sender << ": " << mensaje << endl;
+
+        } else if (type == 'f') {
             int lenDest = stoi(readN(cli, 5));
             string dest = readN(cli, lenDest);
             int lenName = stoi(readN(cli, 5));
@@ -158,53 +114,100 @@ void readSocketThread(int cli) {
                 readBytes += r;
             }
 
-            forwardFile(dest, filename, content, cli);
-        }
-        else if (type == 'q') {
-            string usuario;
-            {
-                lock_guard<mutex> lock(mtx);
-                usuario = clientes[cli];
-                clientes.erase(cli);
-            }
-            cout << usuario << " se ha desconectado." << endl;
+            size_t punto = filename.find_last_of('.');
+            string copiaNombre = (punto == string::npos)
+                ? filename + "_copia"
+                : filename.substr(0, punto) + "_copia" + filename.substr(punto);
+
+            ofstream outfile(copiaNombre, ios::binary);
+            outfile.write(content.data(), lenContent);
+            outfile.close();
+
+            cout << "\nArchivo recibido: " << copiaNombre << endl;
+
+        } else if (type == 'q') {
+            cout << "\nServidor indicó cierre de conexión." << endl;
             break;
         }
     }
     shutdown(cli, SHUT_RDWR);
     close(cli);
+    exit(0);
 }
 
-int main(void) {
+int main() {
     struct sockaddr_in stSockAddr;
     int SocketFD = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (SocketFD < 0) {
         perror("cannot create socket");
         exit(EXIT_FAILURE);
     }
-    memset(&stSockAddr, 0, sizeof(struct sockaddr_in));
+    memset(&stSockAddr, 0, sizeof(stSockAddr));
     stSockAddr.sin_family = AF_INET;
     stSockAddr.sin_port = htons(45000);
-    stSockAddr.sin_addr.s_addr = INADDR_ANY;
-    if (bind(SocketFD, (struct sockaddr *)&stSockAddr, sizeof(struct sockaddr_in)) < 0) {
-        perror("bind failed");
+    inet_pton(AF_INET, "127.0.0.1", &stSockAddr.sin_addr);
+    if (connect(SocketFD, (struct sockaddr *)&stSockAddr, sizeof(stSockAddr)) < 0) {
+        perror("connect failed");
         close(SocketFD);
         exit(EXIT_FAILURE);
     }
-    if (listen(SocketFD, 10) < 0) {
-        perror("listen failed");
-        close(SocketFD);
-        exit(EXIT_FAILURE);
+
+    cout << "Introduce tu nombre de usuario: ";
+    getline(cin, usuario);
+    {
+        stringstream ss;
+        ss << setw(5) << setfill('0') << usuario.size();
+        ss << 'n';
+        ss << usuario;
+        string loginMsg = ss.str();
+        write(SocketFD, loginMsg.c_str(), loginMsg.size());
     }
+
+    thread(readSocketThread, SocketFD).detach();
+
     while (true) {
-        int ConnectFD = accept(SocketFD, NULL, NULL);
-        if (ConnectFD < 0) {
-            perror("accept failed");
+        cout << "\nIngrese comando (mensaje, broadcast, lista, archivo o chau): ";
+        string entrada;
+        getline(cin, entrada);
+
+        if (entrada == "chau") {
+            write(SocketFD, "00001q", 6);
+            shutdown(SocketFD, SHUT_RDWR);
             close(SocketFD);
-            exit(EXIT_FAILURE);
+            break;
         }
-        thread(readSocketThread, ConnectFD).detach();
+
+        if (entrada == "lista") {
+            write(SocketFD, "00001l", 6);
+            continue;
+        }
+
+        if (entrada == "broadcast") {
+            cout << "Ingrese mensaje de broadcast: ";
+            string bMsg;
+            getline(cin, bMsg);
+            string bProtocol = formatBroadcastMessage(bMsg);
+            write(SocketFD, bProtocol.c_str(), bProtocol.size());
+            continue;
+        }
+
+        if (entrada == "archivo") {
+            cout << "Nombre del archivo: ";
+            string nombre;
+            getline(cin, nombre);
+            cout << "Destinatario: ";
+            string dest;
+            getline(cin, dest);
+            string fileMsg = formatFileMessage(nombre, dest);
+            write(SocketFD, fileMsg.c_str(), fileMsg.size());
+            continue;
+        }
+
+        cout << "Destinatario: ";
+        string destino;
+        getline(cin, destino);
+        string normalMsg = formatMessage(entrada, destino);
+        write(SocketFD, normalMsg.c_str(), normalMsg.size());
     }
-    close(SocketFD);
     return 0;
-}
+} 
