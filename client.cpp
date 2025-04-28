@@ -97,7 +97,6 @@ void reader(int sock) {
             string lst = p.substr(off);
             printf("\n[USUARIOS] %s\n", lst.c_str());
         } else if (type == 'F') {
-    // 1) Extrae campos como antes
     size_t ld = stoull(p.substr(off, WFIELD)); off += WFIELD;
     string dst = p.substr(off, ld); off += ld;
     size_t fn = stoull(p.substr(off, WFIELD)); off += WFIELD;
@@ -106,7 +105,7 @@ void reader(int sock) {
     vector<char> data(sz);
     memcpy(data.data(), p.data() + off, sz);
 
-    // 2) Construye el nombre con "_copia" antes de la extensión
+    
     string copia;
     auto pos = orig.find_last_of('.');
     if (pos != string::npos) {
@@ -115,7 +114,7 @@ void reader(int sock) {
         copia = orig + "_copia";
     }
 
-    // 3) Guarda el archivo con el nuevo nombre
+    
     FILE* out = fopen(copia.c_str(), "wb");
     if (out) {
         fwrite(data.data(), 1, sz, out);
